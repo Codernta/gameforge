@@ -1,0 +1,21 @@
+name: gameforge_shared_preferences
+description: >-
+  Optional SharedPreferences persistence adapter for GameForge.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.8.0
+  flutter: ">=3.29.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  gameforge:
+    path: ../../
+  shared_preferences: ^2.5.3
+
+dev_dependencies:
+  flutter_lints: ^6.0.0
+  flutter_test:
+    sdk: flutter

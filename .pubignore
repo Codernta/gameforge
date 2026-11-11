@@ -1,0 +1,10 @@
+# Exclude companion packages and generated build/tool directories from the
+# core gameforge pub.dev archive.
+packages/
+.idea/
+*.iml
+coverage/
+**/.dart_tool/
+**/build/
+**/pubspec.lock
+.flutter-plugins-dependencies
