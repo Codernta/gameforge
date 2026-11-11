@@ -1,6 +1,7 @@
-# Exclude companion packages and generated build/tool directories from the
-# core gameforge pub.dev archive.
+# Exclude companion packages, documentation media, and generated build/tool
+# directories from the core gameforge pub.dev archive.
 packages/
+doc/assets/
 .idea/
 *.iml
 coverage/

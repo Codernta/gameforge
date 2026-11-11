@@ -1,5 +1,7 @@
 # GameForge
 
+![GameForge — Flutter Gameplay Toolkit](https://raw.githubusercontent.com/Codernta/gameforge/main/doc/assets/gameforge_poster.jpg)
+
 A modular, engine-independent Flutter gameplay toolkit for building 2D casual games, puzzle games, platformers, RPGs, and arcade experiences without repeating boilerplate.
 
 ## Overview
