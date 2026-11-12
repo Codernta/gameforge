@@ -2,7 +2,9 @@ import 'package:meta/meta.dart';
 
 import '../health/health_state.dart';
 import '../levels/level_config.dart';
+import '../persistence/serialization.dart';
 import '../score/score_state.dart';
+import '../utils/validators.dart';
 import 'game_exception.dart';
 
 /// Immutable configuration object for creating a [GameForge] controller.
@@ -28,6 +30,9 @@ class GameConfig {
     this.autoGameOverOnZeroLives = true,
     this.saveKey = 'gameforge_save',
     this.saveVersion = 1,
+    this.requireSaveIntegrity = true,
+    this.maxSaveBytes = GameSerialization.defaultMaxJsonBytes,
+    this.maxSaveNestingDepth = GameSerialization.defaultMaxNestingDepth,
     this.custom = const {},
   });
 
@@ -89,6 +94,16 @@ class GameConfig {
   /// Current schema version written into [GameSaveData].
   final int saveVersion;
 
+  /// Whether [GameForge.load] requires a valid checksum / HMAC digest to be
+  /// present on loaded save payloads (defaults to `true`).
+  final bool requireSaveIntegrity;
+
+  /// Maximum allowed save payload size in UTF-8 bytes.
+  final int maxSaveBytes;
+
+  /// Maximum allowed container nesting depth in save payloads.
+  final int maxSaveNestingDepth;
+
   /// Arbitrary developer-defined custom configuration values.
   final Map<String, Object?> custom;
 
@@ -134,16 +149,17 @@ class GameConfig {
         '(got $inventoryCapacity).',
       );
     }
-    if (saveKey.trim().isEmpty) {
-      throw const GameConfigurationException(
-        'GameConfig.saveKey cannot be empty.',
-      );
-    }
+    Validators.requireSafeKey(saveKey, 'GameConfig.saveKey');
     if (saveVersion < 1) {
       throw GameConfigurationException(
         'GameConfig.saveVersion must be >= 1 (got $saveVersion).',
       );
     }
+    Validators.requirePositive(maxSaveBytes, 'GameConfig.maxSaveBytes');
+    Validators.requirePositive(
+      maxSaveNestingDepth,
+      'GameConfig.maxSaveNestingDepth',
+    );
   }
 
   /// Creates a copy of this config with the specified overrides.
@@ -166,6 +182,9 @@ class GameConfig {
     bool? autoGameOverOnZeroLives,
     String? saveKey,
     int? saveVersion,
+    bool? requireSaveIntegrity,
+    int? maxSaveBytes,
+    int? maxSaveNestingDepth,
     Map<String, Object?>? custom,
   }) {
     return GameConfig(
@@ -191,6 +210,9 @@ class GameConfig {
           autoGameOverOnZeroLives ?? this.autoGameOverOnZeroLives,
       saveKey: saveKey ?? this.saveKey,
       saveVersion: saveVersion ?? this.saveVersion,
+      requireSaveIntegrity: requireSaveIntegrity ?? this.requireSaveIntegrity,
+      maxSaveBytes: maxSaveBytes ?? this.maxSaveBytes,
+      maxSaveNestingDepth: maxSaveNestingDepth ?? this.maxSaveNestingDepth,
       custom: custom ?? this.custom,
     );
   }

@@ -13,27 +13,57 @@ class SharedPreferencesGameStorage implements GameStorage {
   SharedPreferencesGameStorage({
     SharedPreferences? preferences,
     this.keyPrefix = 'gameforge:',
-  }) : _preferences = preferences;
+    this.maxSaveBytes = GameSerialization.defaultMaxJsonBytes,
+    this.maxNestingDepth = GameSerialization.defaultMaxNestingDepth,
+  }) : _preferences = preferences {
+    Validators.requireSafeId(
+      keyPrefix,
+      'keyPrefix',
+      exceptionBuilder: (message) => PersistenceException(message),
+    );
+    if (keyPrefix.startsWith('.') ||
+        keyPrefix.contains('..') ||
+        keyPrefix.contains('/') ||
+        keyPrefix.contains(r'\')) {
+      throw const PersistenceException(
+        'keyPrefix contains unsafe path or traversal characters.',
+      );
+    }
+    Validators.requirePositive(maxSaveBytes, 'maxSaveBytes');
+    Validators.requirePositive(maxNestingDepth, 'maxNestingDepth');
+  }
 
   final SharedPreferences? _preferences;
 
   /// Prefix applied to all stored preference keys.
   final String keyPrefix;
 
+  /// Maximum allowed serialized JSON save size in UTF-8 bytes.
+  final int maxSaveBytes;
+
+  /// Maximum allowed container nesting depth in save payloads.
+  final int maxNestingDepth;
+
   Future<SharedPreferences> _resolvePrefs() async =>
       _preferences ?? await SharedPreferences.getInstance();
 
   String _scopedKey(String key) {
-    if (key.trim().isEmpty) {
-      throw const PersistenceException('Storage key cannot be empty.');
-    }
-    return '$keyPrefix$key';
+    final safeKey = Validators.requireSafeKey(
+      key,
+      'Storage key',
+      exceptionBuilder: (message) => PersistenceException(message),
+    );
+    return '$keyPrefix$safeKey';
   }
 
   @override
   Future<void> save(String key, Map<String, Object?> data) async {
     final scoped = _scopedKey(key);
-    final encoded = GameSerialization.encodeJson(data);
+    final encoded = GameSerialization.encodeJson(
+      data,
+      maxBytes: maxSaveBytes,
+      maxDepth: maxNestingDepth,
+    );
     final prefs = await _resolvePrefs();
     final ok = await prefs.setString(scoped, encoded);
     if (!ok) {
@@ -51,7 +81,11 @@ class SharedPreferencesGameStorage implements GameStorage {
     if (raw == null) {
       return null;
     }
-    return GameSerialization.decodeJson(raw);
+    return GameSerialization.decodeJson(
+      raw,
+      maxBytes: maxSaveBytes,
+      maxDepth: maxNestingDepth,
+    );
   }
 
   @override

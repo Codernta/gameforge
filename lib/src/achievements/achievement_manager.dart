@@ -8,6 +8,8 @@ import '../core/game_module.dart';
 import '../persistence/serialization.dart';
 import '../rewards/reward_manager.dart';
 import '../utils/game_clock.dart';
+import '../utils/security.dart';
+import '../utils/validators.dart';
 import 'achievement.dart';
 import 'achievement_progress.dart';
 
@@ -130,7 +132,15 @@ class AchievementManager extends GameModule {
     if (existing.isUnlocked) {
       return existing;
     }
-    return setProgress(id, existing.currentValue + amount);
+    final nextValue = Validators.safeAddInt(
+      existing.currentValue,
+      amount,
+      'Achievement progress for "$id"',
+      min: 0,
+      max: GameSecurity.maxSafeInteger,
+      exceptionBuilder: (message) => AchievementException(message),
+    );
+    return setProgress(id, nextValue);
   }
 
   /// Sets absolute progress on [id] to [value] (clamped at `targetValue`).

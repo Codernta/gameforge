@@ -21,7 +21,7 @@ Flutter HUD widgets and input adapters live in an optional `package:gameforge/fl
 - **Achievements**: Progress tracking, custom `AchievementCondition` interfaces, idempotent unlocks, and automatic reward payouts.
 - **Typed Event Bus**: `GameEventBus` supporting strongly typed events, filtered subscriptions, safe error handling, stream disposal, and cascade loop protection.
 - **Timers & Deterministic Clock**: `CountdownTimer`, `StopwatchTimer`, `PeriodicTimer`, pause-aware `GameTimerManager`, and `FakeGameClock` for deterministic testing.
-- **Persistence & Migrations**: Pluggable `GameStorage` interface, `MemoryGameStorage`, strict `GameSerialization`, integrity checksums on `GameSaveData`, atomic rollback on failed restore, and chained `SaveMigration` support.
+- **Persistence & Migrations**: Pluggable `GameStorage` interface, `MemoryGameStorage`, strict `GameSerialization` with payload size/depth/cycle guards, SHA-256 / keyed HMAC-SHA256 integrity verification on `GameSaveData`, atomic rollback on failed restore, and pre-verified chained `SaveMigration` support.
 - **Sessions, Input & Audio**: Active session duration tracking (excluding paused intervals), engine-independent input abstractions (`TapInputEvent`, `SwipeInputEvent`, `KeyInputEvent`, `JoystickInputEvent`, etc.), and `GameAudioService` abstraction.
 - **Optional Flutter UI Layer**: `GameForgeScope`, `GameForgeBuilder`, `GameScoreWidget`, `GameHealthWidget`, `GameTimerWidget`, `GameForgeInputRegion`, and `VirtualJoystickWidget`.
 
@@ -44,7 +44,7 @@ lib/
     session/                     # GameSessionManager, SessionState, SessionStatus
     input/                       # GameInputHandler, GameInputEvent hierarchy
     audio/                       # GameAudioService, AudioSettings, Noop/RecordingGameAudioService
-    utils/                       # GameClock, GameTicker, FakeGameClock, IdGenerator, Validators
+    utils/                       # GameClock, GameTicker, FakeGameClock, IdGenerator, GameSecurity, Validators
     adapters/
       flutter/                   # GameForgeScope, GameForgeBuilder, GameForgeInputRegion, VirtualJoystickWidget
       widgets/                   # GameScoreWidget, GameHealthWidget, GameTimerWidget
@@ -76,7 +76,7 @@ Add `gameforge` to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  gameforge: ^0.1.0
+  gameforge: ^0.2.0
 ```
 
 Import the pure Dart core or the Flutter UI layer:
@@ -239,9 +239,9 @@ final roundTimer = game.timers.countdown(
 );
 ```
 
-### Persistence & Save Migrations
+### Persistence, Integrity & Save Migrations
 
-Implement `GameStorage` for your preferred persistence backend (or use `MemoryGameStorage` / `gameforge_shared_preferences`):
+Implement `GameStorage` for your preferred persistence backend (or use `MemoryGameStorage` / `gameforge_shared_preferences`). By default (`GameConfig.requireSaveIntegrity = true`), saves include a canonical **SHA-256** digest verified in constant time before migrations run; pass `saveSigningKey` to `GameForge` to upgrade save authentication to keyed **HMAC-SHA256** (automatically zeroed on `dispose()`):
 
 ```dart
 class V1ToV2Migration implements SaveMigration {
@@ -259,8 +259,13 @@ class V1ToV2Migration implements SaveMigration {
 }
 
 final game = GameForge(
-  config: const GameConfig(saveVersion: 2),
+  config: const GameConfig(
+    saveVersion: 2,
+    requireSaveIntegrity: true,
+    maxSaveBytes: 1024 * 1024, // 1 MiB payload cap
+  ),
   storage: myStorage,
+  saveSigningKey: utf8.encode('your-32-byte-secret-signing-key!'),
   saveMigrations: [V1ToV2Migration()],
 );
 ```
@@ -328,7 +333,7 @@ All package-specific errors extend `GameException`, including:
 - `LevelNotFoundException`, `LevelLockedException`
 - `ItemNotFoundException`, `InsufficientItemException`, `InventoryFullException`, `DuplicateItemException`
 - `RewardAlreadyClaimedException`, `AchievementNotFoundException`
-- `CorruptSaveDataException`, `SaveMigrationException`, `SaveValidationException`
+- `CorruptSaveDataException`, `SaveIntegrityException`, `SaveMigrationException`, `SaveValidationException`
 
 ## Testing
 

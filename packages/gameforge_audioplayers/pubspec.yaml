@@ -1,7 +1,7 @@
 name: gameforge_audioplayers
 description: >-
   Optional audioplayers adapter implementing GameForge's GameAudioService.
-version: 0.1.0
+version: 0.2.0
 publish_to: none
 
 environment:
@@ -9,7 +9,7 @@ environment:
   flutter: ">=3.29.0"
 
 dependencies:
-  audioplayers: ^6.5.0
+  audioplayers: ^6.8.1
   flutter:
     sdk: flutter
   gameforge:

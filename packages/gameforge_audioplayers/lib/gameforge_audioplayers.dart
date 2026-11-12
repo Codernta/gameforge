@@ -80,6 +80,10 @@ class AudioplayersGameAudioService implements GameAudioService {
        _playerFactory =
            playerFactory ?? (() => _RealAudioPlayerPort(AudioPlayer())) {
     _settings.validate();
+    Validators.requirePositive(
+      maxConcurrentSfxPlayers,
+      'maxConcurrentSfxPlayers',
+    );
   }
 
   final AudioplayersSourceResolver _sourceResolver;
@@ -112,6 +116,9 @@ class AudioplayersGameAudioService implements GameAudioService {
 
   @override
   Future<void> preload(List<String> assetIds) async {
+    for (final id in assetIds) {
+      Validators.requireSafeAssetId(id, 'assetId');
+    }
     // audioplayers loads sources lazily on play; kept as a safe hook.
   }
 
@@ -121,9 +128,11 @@ class AudioplayersGameAudioService implements GameAudioService {
     bool loop = true,
     double? volume,
   }) async {
+    Validators.requireSafeAssetId(trackId, 'trackId');
+    final validatedVolume = volume == null ? null : _validateVolume(volume);
     if (_isDisposed) return;
     _musicPlayer ??= _playerFactory();
-    _musicTrackVolumeOverride = volume;
+    _musicTrackVolumeOverride = validatedVolume;
     await _musicPlayer!.setReleaseMode(
       loop ? ReleaseMode.loop : ReleaseMode.release,
     );
@@ -150,11 +159,12 @@ class AudioplayersGameAudioService implements GameAudioService {
 
   @override
   Future<void> playSfx(String soundId, {double? volume}) async {
+    Validators.requireSafeAssetId(soundId, 'soundId');
+    final validatedVolume = volume == null ? 1.0 : _validateVolume(volume);
     if (_isDisposed) return;
     final player = _nextSfxPlayer();
     await player.setReleaseMode(ReleaseMode.release);
-    final effective =
-        ((volume ?? 1.0).clamp(0.0, 1.0)) * _settings.effectiveSfxVolume;
+    final effective = validatedVolume * _settings.effectiveSfxVolume;
     await player.play(_sourceResolver(soundId), volume: effective);
   }
 

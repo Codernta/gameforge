@@ -93,5 +93,36 @@ void main() {
         expect(createdPlayers.every((p) => p.disposed), isTrue);
       },
     );
+
+    test(
+      'rejects unsafe asset IDs, invalid volumes, and bad pool size',
+      () async {
+        expect(
+          () => AudioplayersGameAudioService(maxConcurrentSfxPlayers: 0),
+          throwsA(isA<GameConfigurationException>()),
+        );
+
+        final audio = AudioplayersGameAudioService(
+          playerFactory: _FakeAudioPlayerPort.new,
+        );
+        await expectLater(
+          audio.preload(const ['../secret.mp3']),
+          throwsA(isA<GameConfigurationException>()),
+        );
+        await expectLater(
+          audio.playMusic('file:///etc/passwd'),
+          throwsA(isA<GameConfigurationException>()),
+        );
+        await expectLater(
+          audio.playSfx('coin.wav', volume: double.nan),
+          throwsA(isA<GameConfigurationException>()),
+        );
+        await expectLater(
+          audio.playSfx('coin.wav', volume: 1.25),
+          throwsA(isA<GameConfigurationException>()),
+        );
+        await audio.dispose();
+      },
+    );
   });
 }

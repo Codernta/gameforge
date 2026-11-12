@@ -326,8 +326,19 @@ class PersistenceException extends GameException {
 /// Thrown when stored save data cannot be parsed or fails integrity checks.
 class CorruptSaveDataException extends PersistenceException {
   /// Creates a [CorruptSaveDataException].
-  const CorruptSaveDataException(super.message, {super.cause, super.stackTrace})
-    : super(code: 'corrupt_save_data');
+  const CorruptSaveDataException(
+    super.message, {
+    super.code = 'corrupt_save_data',
+    super.cause,
+    super.stackTrace,
+  });
+}
+
+/// Thrown when save payload integrity or HMAC authentication fails.
+class SaveIntegrityException extends CorruptSaveDataException {
+  /// Creates a [SaveIntegrityException].
+  const SaveIntegrityException(super.message, {super.cause, super.stackTrace})
+    : super(code: 'save_integrity_error');
 }
 
 /// Thrown when migrating save data across versions fails.

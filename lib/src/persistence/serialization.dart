@@ -1,15 +1,40 @@
 import 'dart:convert';
 
 import '../core/game_exception.dart';
+import '../utils/security.dart';
+import '../utils/validators.dart';
 
 /// Strict serialization and type-safe deserialization utilities for GameForge
 /// persistence payloads.
 abstract final class GameSerialization {
+  /// Default maximum allowed JSON save payload size in UTF-8 bytes (5 MiB).
+  static const int defaultMaxJsonBytes = 5 * 1024 * 1024;
+
+  /// Default maximum allowed container nesting depth in save payloads.
+  static const int defaultMaxNestingDepth = 64;
+
   /// Encodes [data] as a JSON string, throwing [PersistenceException] if
-  /// [data] contains non-encodable objects.
-  static String encodeJson(Map<String, Object?> data) {
+  /// [data] contains cycles, non-finite floats, exceeds [maxDepth] or
+  /// [maxBytes], or contains non-encodable objects.
+  static String encodeJson(
+    Map<String, Object?> data, {
+    int maxBytes = defaultMaxJsonBytes,
+    int maxDepth = defaultMaxNestingDepth,
+  }) {
+    Validators.requirePositive(maxBytes, 'maxBytes');
+    Validators.requirePositive(maxDepth, 'maxDepth');
     try {
-      return jsonEncode(data);
+      final normalized = normalizeMap(data, maxDepth: maxDepth);
+      final encoded = jsonEncode(normalized);
+      if (!_fitsUtf8ByteLimit(encoded, maxBytes)) {
+        throw PersistenceException(
+          'Encoded save payload exceeds maximum allowed size of '
+          '$maxBytes bytes.',
+        );
+      }
+      return encoded;
+    } on PersistenceException {
+      rethrow;
     } catch (error, stackTrace) {
       throw PersistenceException(
         'Failed to encode save payload to JSON.',
@@ -20,8 +45,23 @@ abstract final class GameSerialization {
   }
 
   /// Decodes a JSON object string into a `Map<String, Object?>`, throwing
-  /// [CorruptSaveDataException] on malformed JSON or non-object roots.
-  static Map<String, Object?> decodeJson(String raw) {
+  /// [CorruptSaveDataException] on oversized payloads, excessive nesting,
+  /// malformed JSON, or non-object roots.
+  static Map<String, Object?> decodeJson(
+    String raw, {
+    int maxBytes = defaultMaxJsonBytes,
+    int maxDepth = defaultMaxNestingDepth,
+  }) {
+    Validators.requirePositive(maxBytes, 'maxBytes');
+    Validators.requirePositive(maxDepth, 'maxDepth');
+
+    if (!_fitsUtf8ByteLimit(raw, maxBytes)) {
+      throw CorruptSaveDataException(
+        'Save payload exceeds maximum allowed size of $maxBytes bytes.',
+      );
+    }
+    _validateJsonNestingDepth(raw, maxDepth);
+
     try {
       final decoded = jsonDecode(raw);
       if (decoded is! Map) {
@@ -29,7 +69,7 @@ abstract final class GameSerialization {
           'Expected top-level JSON object for save data.',
         );
       }
-      return normalizeMap(decoded);
+      return normalizeMap(decoded, maxDepth: maxDepth);
     } on CorruptSaveDataException {
       rethrow;
     } catch (error, stackTrace) {
@@ -43,22 +83,72 @@ abstract final class GameSerialization {
 
   /// Recursively copies and normalizes maps/lists into safe JSON-compatible
   /// `Map<String, Object?>` and `List<Object?>` structures.
-  static Map<String, Object?> normalizeMap(Map<Object?, Object?> source) {
-    final result = <String, Object?>{};
-    for (final entry in source.entries) {
-      final key = entry.key;
-      if (key is! String) {
-        throw CorruptSaveDataException(
-          'Expected string key in save map, found ${key.runtimeType}.',
-        );
-      }
-      result[key] = _normalizeValue(entry.value);
-    }
-    return result;
+  static Map<String, Object?> normalizeMap(
+    Map<Object?, Object?> source, {
+    int maxDepth = defaultMaxNestingDepth,
+  }) {
+    Validators.requirePositive(maxDepth, 'maxDepth');
+    return _normalizeMapInternal(
+      source,
+      depth: 1,
+      maxDepth: maxDepth,
+      seen: Set<Object>.identity(),
+    );
   }
 
-  static Object? _normalizeValue(Object? value) {
-    if (value == null || value is bool || value is num || value is String) {
+  static Map<String, Object?> _normalizeMapInternal(
+    Map<Object?, Object?> source, {
+    required int depth,
+    required int maxDepth,
+    required Set<Object> seen,
+  }) {
+    if (depth > maxDepth) {
+      throw CorruptSaveDataException(
+        'Save payload exceeds maximum nesting depth of $maxDepth.',
+      );
+    }
+    if (!seen.add(source)) {
+      throw const CorruptSaveDataException(
+        'Cyclic reference detected in save payload.',
+      );
+    }
+    try {
+      final result = <String, Object?>{};
+      for (final entry in source.entries) {
+        final key = entry.key;
+        if (key is! String) {
+          throw CorruptSaveDataException(
+            'Expected string key in save map, found ${key.runtimeType}.',
+          );
+        }
+        result[key] = _normalizeValue(
+          entry.value,
+          depth: depth + 1,
+          maxDepth: maxDepth,
+          seen: seen,
+        );
+      }
+      return result;
+    } finally {
+      seen.remove(source);
+    }
+  }
+
+  static Object? _normalizeValue(
+    Object? value, {
+    required int depth,
+    required int maxDepth,
+    required Set<Object> seen,
+  }) {
+    if (value == null || value is bool || value is String || value is int) {
+      return value;
+    }
+    if (value is double) {
+      if (!value.isFinite) {
+        throw const CorruptSaveDataException(
+          'Non-finite floating-point value is not allowed in save data.',
+        );
+      }
       return value;
     }
     if (value is DateTime) {
@@ -68,60 +158,230 @@ abstract final class GameSerialization {
       return value.inMicroseconds;
     }
     if (value is Map<Object?, Object?>) {
-      return normalizeMap(value);
-    }
-    if (value is List<Object?>) {
-      return value.map(_normalizeValue).toList(growable: false);
+      return _normalizeMapInternal(
+        value,
+        depth: depth,
+        maxDepth: maxDepth,
+        seen: seen,
+      );
     }
     if (value is Iterable<Object?>) {
-      return value.map(_normalizeValue).toList(growable: false);
+      if (depth > maxDepth) {
+        throw CorruptSaveDataException(
+          'Save payload exceeds maximum nesting depth of $maxDepth.',
+        );
+      }
+      if (!seen.add(value)) {
+        throw const CorruptSaveDataException(
+          'Cyclic reference detected in save payload.',
+        );
+      }
+      try {
+        return value
+            .map(
+              (item) => _normalizeValue(
+                item,
+                depth: depth + 1,
+                maxDepth: maxDepth,
+                seen: seen,
+              ),
+            )
+            .toList(growable: false);
+      } finally {
+        seen.remove(value);
+      }
     }
     throw CorruptSaveDataException(
       'Unsupported value type in save data: ${value.runtimeType}.',
     );
   }
 
-  /// Computes a deterministic cross-platform integrity checksum over canonical
+  /// Computes a deterministic cross-platform integrity digest over canonical
   /// JSON representation of [data] (ignoring any `'checksum'` key).
-  static String computeChecksum(Map<String, Object?> data) {
-    final canonical = _canonicalizeWithoutChecksum(data);
+  ///
+  /// Uses SHA-256 by default, or HMAC-SHA256 when [secretKey] is provided.
+  /// Throws [GameConfigurationException] if [secretKey] is empty.
+  static String computeChecksum(
+    Map<String, Object?> data, {
+    List<int>? secretKey,
+    int maxDepth = defaultMaxNestingDepth,
+  }) {
+    if (secretKey != null && secretKey.isEmpty) {
+      throw const GameConfigurationException(
+        'Save signing key must not be empty.',
+      );
+    }
+    Validators.requirePositive(maxDepth, 'maxDepth');
+    final canonical = _canonicalizeWithoutChecksum(data, maxDepth: maxDepth);
     final encoded = jsonEncode(canonical);
     final units = utf8.encode(encoded);
-
-    // Paired 32-bit FNV-1a and DJB2 digests using 32-bit masking so output is
-    // identical across Dart VM, JS, and Wasm targets.
-    var fnv = 0x811c9dc5;
-    var djb = 5381;
-    for (final byte in units) {
-      fnv ^= byte;
-      fnv = (fnv * 0x01000193) & 0xFFFFFFFF;
-      djb = (((djb << 5) + djb) ^ byte) & 0xFFFFFFFF;
+    if (secretKey != null) {
+      return GameSecurity.hmacSha256Hex(key: secretKey, data: units);
     }
-    final fnvHex = fnv.toRadixString(16).padLeft(8, '0');
-    final djbHex = djb.toRadixString(16).padLeft(8, '0');
-    return '$fnvHex$djbHex';
+    return GameSecurity.sha256Hex(units);
   }
 
-  static Object? _canonicalize(Object? value) {
-    if (value is Map<Object?, Object?>) {
-      final sortedKeys = value.keys.map((k) => k.toString()).toList()..sort();
-      final ordered = <String, Object?>{};
-      for (final key in sortedKeys) {
-        ordered[key] = _canonicalize(value[key]);
+  /// Verifies [expectedChecksum] against [data] using constant-time
+  /// hexadecimal comparison.
+  static bool verifyChecksum(
+    Map<String, Object?> data,
+    String expectedChecksum, {
+    List<int>? secretKey,
+    int maxDepth = defaultMaxNestingDepth,
+  }) {
+    final computed = computeChecksum(
+      data,
+      secretKey: secretKey,
+      maxDepth: maxDepth,
+    );
+    return GameSecurity.constantTimeHexEquals(expectedChecksum, computed);
+  }
+
+  static Object? _canonicalize(
+    Object? value, {
+    required int depth,
+    required int maxDepth,
+    required Set<Object> seen,
+  }) {
+    if (value == null || value is bool || value is String || value is int) {
+      return value;
+    }
+    if (value is double) {
+      if (!value.isFinite) {
+        throw const CorruptSaveDataException(
+          'Non-finite floating-point value is not allowed in save data.',
+        );
       }
-      return ordered;
+      return value;
     }
-    if (value is List<Object?>) {
-      return value.map(_canonicalize).toList(growable: false);
+    if (value is DateTime) {
+      return value.toUtc().toIso8601String();
     }
-    return value;
+    if (value is Duration) {
+      return value.inMicroseconds;
+    }
+    if (value is Map<Object?, Object?>) {
+      if (depth > maxDepth) {
+        throw CorruptSaveDataException(
+          'Save payload exceeds maximum nesting depth of $maxDepth.',
+        );
+      }
+      if (!seen.add(value)) {
+        throw const CorruptSaveDataException(
+          'Cyclic reference detected in save payload.',
+        );
+      }
+      try {
+        final sortedKeys = <String>[];
+        for (final key in value.keys) {
+          if (key is! String) {
+            throw CorruptSaveDataException(
+              'Expected string key in save map, found ${key.runtimeType}.',
+            );
+          }
+          sortedKeys.add(key);
+        }
+        sortedKeys.sort();
+        final ordered = <String, Object?>{};
+        for (final key in sortedKeys) {
+          ordered[key] = _canonicalize(
+            value[key],
+            depth: depth + 1,
+            maxDepth: maxDepth,
+            seen: seen,
+          );
+        }
+        return ordered;
+      } finally {
+        seen.remove(value);
+      }
+    }
+    if (value is Iterable<Object?>) {
+      if (depth > maxDepth) {
+        throw CorruptSaveDataException(
+          'Save payload exceeds maximum nesting depth of $maxDepth.',
+        );
+      }
+      if (!seen.add(value)) {
+        throw const CorruptSaveDataException(
+          'Cyclic reference detected in save payload.',
+        );
+      }
+      try {
+        return value
+            .map(
+              (item) => _canonicalize(
+                item,
+                depth: depth + 1,
+                maxDepth: maxDepth,
+                seen: seen,
+              ),
+            )
+            .toList(growable: false);
+      } finally {
+        seen.remove(value);
+      }
+    }
+    throw CorruptSaveDataException(
+      'Unsupported value type in save data: ${value.runtimeType}.',
+    );
   }
 
   static Map<String, Object?> _canonicalizeWithoutChecksum(
-    Map<String, Object?> data,
-  ) {
+    Map<String, Object?> data, {
+    required int maxDepth,
+  }) {
     final copy = Map<String, Object?>.of(data)..remove('checksum');
-    return _canonicalize(copy)! as Map<String, Object?>;
+    return _canonicalize(
+          copy,
+          depth: 1,
+          maxDepth: maxDepth,
+          seen: Set<Object>.identity(),
+        )!
+        as Map<String, Object?>;
+  }
+
+  static bool _fitsUtf8ByteLimit(String value, int maxBytes) {
+    if (value.length > maxBytes) {
+      return false;
+    }
+    if (value.length * 3 <= maxBytes) {
+      return true;
+    }
+    return utf8.encode(value).length <= maxBytes;
+  }
+
+  static void _validateJsonNestingDepth(String raw, int maxDepth) {
+    var depth = 0;
+    var inString = false;
+    var escaped = false;
+    for (var i = 0; i < raw.length; i++) {
+      final code = raw.codeUnitAt(i);
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (code == 0x5C) {
+          escaped = true;
+        } else if (code == 0x22) {
+          inString = false;
+        }
+        continue;
+      }
+      if (code == 0x22) {
+        inString = true;
+      } else if (code == 0x7B || code == 0x5B) {
+        depth++;
+        if (depth > maxDepth) {
+          throw CorruptSaveDataException(
+            'Save payload exceeds maximum nesting depth of $maxDepth.',
+          );
+        }
+      } else if (code == 0x7D || code == 0x5D) {
+        if (depth > 0) {
+          depth--;
+        }
+      }
+    }
   }
 
   /// Reads an integer field [key] from [map], or returns [defaultValue] if
@@ -141,11 +401,14 @@ abstract final class GameSerialization {
     if (value is int) {
       return value;
     }
-    if (value is num && value == value.truncateToDouble()) {
+    if (value is double &&
+        value.isFinite &&
+        value == value.truncateToDouble() &&
+        value.abs() <= GameSecurity.maxSafeInteger) {
       return value.toInt();
     }
     throw CorruptSaveDataException(
-      'Expected integer for "$key", got ${value.runtimeType}.',
+      'Expected safe integer for "$key", got ${value.runtimeType}.',
     );
   }
 
@@ -281,6 +544,7 @@ abstract final class GameSerialization {
     Map<String, Object?> map,
     String key, {
     List<Object?>? defaultValue,
+    int maxDepth = defaultMaxNestingDepth,
   }) {
     if (!map.containsKey(key) || map[key] == null) {
       if (defaultValue != null) {
@@ -290,7 +554,13 @@ abstract final class GameSerialization {
     }
     final value = map[key];
     if (value is List<Object?>) {
-      return value.map(_normalizeValue).toList(growable: false);
+      return _normalizeValue(
+            value,
+            depth: 1,
+            maxDepth: maxDepth,
+            seen: Set<Object>.identity(),
+          )!
+          as List<Object?>;
     }
     throw CorruptSaveDataException(
       'Expected list for "$key", got ${value.runtimeType}.',

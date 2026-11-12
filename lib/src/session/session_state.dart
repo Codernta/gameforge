@@ -3,6 +3,7 @@ import 'package:meta/meta.dart';
 import '../core/game_event.dart';
 import '../core/game_exception.dart';
 import '../persistence/serialization.dart';
+import '../utils/validators.dart';
 
 /// Lifecycle states for a gameplay session.
 enum SessionStatus {
@@ -76,6 +77,14 @@ class SessionState {
       'sessionScore',
       defaultValue: 0,
     );
+    if (status != SessionStatus.idle) {
+      Validators.requireSafeId(
+        sessionId,
+        'sessionId',
+        exceptionBuilder: (message) => CorruptSaveDataException(message),
+      );
+    }
+    final statusNameValue = status;
     final rawStats = GameSerialization.readMap(
       json,
       'statistics',
@@ -83,10 +92,16 @@ class SessionState {
     );
     final stats = <String, num>{};
     for (final entry in rawStats.entries) {
+      Validators.requireSafeId(
+        entry.key,
+        'statistic key',
+        exceptionBuilder: (message) => CorruptSaveDataException(message),
+      );
       final value = entry.value;
-      if (value is! num) {
+      if (value is! num || !value.isFinite) {
         throw CorruptSaveDataException(
-          'Expected numeric stat for "${entry.key}", got ${value.runtimeType}.',
+          'Expected finite numeric stat for "${entry.key}", '
+          'got ${value.runtimeType}.',
         );
       }
       stats[entry.key] = value;
@@ -94,7 +109,7 @@ class SessionState {
 
     return SessionState(
       sessionId: sessionId,
-      status: status,
+      status: statusNameValue,
       startTime: startTime,
       endTime: endTime,
       duration: Duration(microseconds: durationUs),

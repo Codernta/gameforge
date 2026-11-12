@@ -3,7 +3,7 @@ description: >-
   A modular, engine-independent Flutter gameplay toolkit for scores, health,
   levels, inventory, rewards, achievements, timers, sessions, events, and
   persistence.
-version: 0.1.0
+version: 0.2.0
 repository: https://github.com/Codernta/gameforge
 topics:
   - game

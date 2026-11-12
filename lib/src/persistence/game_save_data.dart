@@ -1,6 +1,7 @@
 import 'package:meta/meta.dart';
 
 import '../core/game_exception.dart';
+import '../utils/validators.dart';
 import 'serialization.dart';
 
 /// Migrates raw serialized save data from [fromVersion] to [toVersion].
@@ -35,14 +36,62 @@ class SaveMigrationRunner {
 
   /// Migrates [rawData] from its recorded `version` up to [targetVersion].
   ///
+  /// When [verifyChecksum] is `true`, verifies any present `'checksum'` field
+  /// against [rawData] before executing migration steps so a downgraded
+  /// version cannot bypass integrity verification. When [requireChecksum] is
+  /// `true`, rejects payloads that omit `'checksum'`.
+  ///
   /// When [rawData] already matches [targetVersion], returns a normalized copy.
-  /// Throws [SaveMigrationException] on missing migration paths or downgrades.
+  /// Throws [SaveIntegrityException] on integrity failure and
+  /// [SaveMigrationException] on missing migration paths or downgrades.
   Map<String, Object?> migrateTo({
     required Map<String, Object?> rawData,
     required int targetVersion,
+    bool verifyChecksum = true,
+    bool requireChecksum = false,
+    List<int>? secretKey,
+    int maxDepth = GameSerialization.defaultMaxNestingDepth,
   }) {
-    final current = GameSerialization.normalizeMap(rawData);
+    if (targetVersion < 1) {
+      throw SaveMigrationException(
+        'Target save version must be >= 1 (got $targetVersion).',
+      );
+    }
+    if (secretKey != null && secretKey.isEmpty) {
+      throw const GameConfigurationException(
+        'Save signing key must not be empty.',
+      );
+    }
+
+    final current = GameSerialization.normalizeMap(rawData, maxDepth: maxDepth);
     var version = GameSerialization.readInt(current, 'version');
+    if (version < 1) {
+      throw CorruptSaveDataException(
+        'Save version must be >= 1 (got $version).',
+      );
+    }
+
+    final savedChecksum = GameSerialization.readOptionalString(
+      current,
+      'checksum',
+    );
+    if (requireChecksum && (savedChecksum == null || savedChecksum.isEmpty)) {
+      throw const SaveIntegrityException(
+        'Save data is missing a required integrity checksum.',
+      );
+    }
+    if (verifyChecksum && savedChecksum != null) {
+      if (!GameSerialization.verifyChecksum(
+        current,
+        savedChecksum,
+        secretKey: secretKey,
+        maxDepth: maxDepth,
+      )) {
+        throw const SaveIntegrityException(
+          'Save data integrity verification failed before migration.',
+        );
+      }
+    }
 
     if (version == targetVersion) {
       return current;
@@ -80,15 +129,21 @@ class SaveMigrationRunner {
         );
       }
 
-      final migrated = chosen.migrate(GameSerialization.normalizeMap(working));
-      working = GameSerialization.normalizeMap(migrated);
+      final migrated = chosen.migrate(
+        GameSerialization.normalizeMap(working, maxDepth: maxDepth),
+      );
+      working = GameSerialization.normalizeMap(migrated, maxDepth: maxDepth);
       working['version'] = chosen.toVersion;
       version = chosen.toVersion;
     }
 
-    // Recompute checksum if the input carried one, reflecting the migrated data.
-    if (working.containsKey('checksum')) {
-      working['checksum'] = GameSerialization.computeChecksum(working);
+    // Recompute checksum after verifying the pre-migration payload.
+    if (savedChecksum != null || requireChecksum) {
+      working['checksum'] = GameSerialization.computeChecksum(
+        working,
+        secretKey: secretKey,
+        maxDepth: maxDepth,
+      );
     }
     return working;
   }
@@ -124,8 +179,17 @@ class GameSaveData {
   factory GameSaveData.fromJson(
     Map<String, Object?> data, {
     bool verifyChecksum = true,
+    bool requireChecksum = false,
+    List<int>? secretKey,
+    int maxDepth = GameSerialization.defaultMaxNestingDepth,
   }) {
-    final normalized = GameSerialization.normalizeMap(data);
+    if (secretKey != null && secretKey.isEmpty) {
+      throw const GameConfigurationException(
+        'Save signing key must not be empty.',
+      );
+    }
+
+    final normalized = GameSerialization.normalizeMap(data, maxDepth: maxDepth);
     final version = GameSerialization.readInt(normalized, 'version');
     if (version < 1) {
       throw CorruptSaveDataException(
@@ -137,13 +201,21 @@ class GameSaveData {
       normalized,
       'checksum',
     );
+    if (requireChecksum && (savedChecksum == null || savedChecksum.isEmpty)) {
+      throw const SaveIntegrityException(
+        'Save data is missing a required integrity checksum.',
+      );
+    }
     if (verifyChecksum && savedChecksum != null) {
-      final computed = GameSerialization.computeChecksum(normalized);
-      if (computed != savedChecksum) {
-        throw CorruptSaveDataException(
-          'Save data checksum mismatch (expected $savedChecksum, '
-          'computed $computed).',
-        );
+      if (!GameSerialization.verifyChecksum(
+        normalized,
+        savedChecksum,
+        secretKey: secretKey,
+        maxDepth: maxDepth,
+      )) {
+        // Deliberately omit expected/computed digests to avoid exposing a
+        // verification oracle.
+        throw const SaveIntegrityException('Save data integrity check failed.');
       }
     }
 
@@ -164,13 +236,21 @@ class GameSaveData {
     );
     final modules = <String, Map<String, Object?>>{};
     for (final entry in rawModules.entries) {
+      Validators.requireSafeId(
+        entry.key,
+        'module id',
+        exceptionBuilder: (message) => CorruptSaveDataException(message),
+      );
       final value = entry.value;
       if (value is! Map<Object?, Object?>) {
         throw CorruptSaveDataException(
           'Expected map for custom module "${entry.key}" in save payload.',
         );
       }
-      modules[entry.key] = GameSerialization.normalizeMap(value);
+      modules[entry.key] = GameSerialization.normalizeMap(
+        value,
+        maxDepth: maxDepth,
+      );
     }
 
     final metadata = GameSerialization.readMap(
@@ -232,33 +312,65 @@ class GameSaveData {
   final String? checksum;
 
   /// Serializes this save snapshot into a JSON-compatible map including an
-  /// integrity checksum when [includeChecksum] is `true`.
-  Map<String, Object?> toJson({bool includeChecksum = true}) {
+  /// integrity digest when [includeChecksum] is `true` (HMAC-SHA256 when
+  /// [secretKey] is provided, or SHA-256 otherwise).
+  Map<String, Object?> toJson({
+    bool includeChecksum = true,
+    List<int>? secretKey,
+    int maxDepth = GameSerialization.defaultMaxNestingDepth,
+  }) {
+    if (secretKey != null && secretKey.isEmpty) {
+      throw const GameConfigurationException(
+        'Save signing key must not be empty.',
+      );
+    }
     final map = <String, Object?>{
       'version': version,
       'savedAt': savedAt.toUtc().toIso8601String(),
       'payload': <String, Object?>{
-        if (score != null) 'score': GameSerialization.normalizeMap(score!),
-        if (health != null) 'health': GameSerialization.normalizeMap(health!),
-        if (levels != null) 'levels': GameSerialization.normalizeMap(levels!),
+        if (score != null)
+          'score': GameSerialization.normalizeMap(score!, maxDepth: maxDepth),
+        if (health != null)
+          'health': GameSerialization.normalizeMap(health!, maxDepth: maxDepth),
+        if (levels != null)
+          'levels': GameSerialization.normalizeMap(levels!, maxDepth: maxDepth),
         if (inventory != null)
-          'inventory': GameSerialization.normalizeMap(inventory!),
+          'inventory': GameSerialization.normalizeMap(
+            inventory!,
+            maxDepth: maxDepth,
+          ),
         if (rewards != null)
-          'rewards': GameSerialization.normalizeMap(rewards!),
+          'rewards': GameSerialization.normalizeMap(
+            rewards!,
+            maxDepth: maxDepth,
+          ),
         if (achievements != null)
-          'achievements': GameSerialization.normalizeMap(achievements!),
+          'achievements': GameSerialization.normalizeMap(
+            achievements!,
+            maxDepth: maxDepth,
+          ),
         if (session != null)
-          'session': GameSerialization.normalizeMap(session!),
+          'session': GameSerialization.normalizeMap(
+            session!,
+            maxDepth: maxDepth,
+          ),
         if (modules.isNotEmpty)
           'modules': {
             for (final entry in modules.entries)
-              entry.key: GameSerialization.normalizeMap(entry.value),
+              entry.key: GameSerialization.normalizeMap(
+                entry.value,
+                maxDepth: maxDepth,
+              ),
           },
       },
-      'metadata': GameSerialization.normalizeMap(metadata),
+      'metadata': GameSerialization.normalizeMap(metadata, maxDepth: maxDepth),
     };
     if (includeChecksum) {
-      map['checksum'] = GameSerialization.computeChecksum(map);
+      map['checksum'] = GameSerialization.computeChecksum(
+        map,
+        secretKey: secretKey,
+        maxDepth: maxDepth,
+      );
     }
     return map;
   }

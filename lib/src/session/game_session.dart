@@ -8,6 +8,7 @@ import '../persistence/game_storage.dart';
 import '../persistence/serialization.dart';
 import '../utils/game_clock.dart';
 import '../utils/id_generator.dart';
+import '../utils/validators.dart';
 import 'session_state.dart';
 
 /// Manages gameplay sessions, active duration tracking (excluding pauses),
@@ -25,7 +26,10 @@ class GameSessionManager extends GameModule {
   }) : _historyStorage = historyStorage,
        _clock = clock,
        _idGenerator = idGenerator ?? RandomIdGenerator(),
-       _eventBus = eventBus;
+       _eventBus = eventBus {
+    Validators.requireSafeKey(historyStorageKey, 'historyStorageKey');
+    Validators.requirePositive(maxHistoryEntries, 'maxHistoryEntries');
+  }
 
   /// Module identifier used when registered in [GameForge].
   static const String moduleId = 'session';
@@ -160,7 +164,27 @@ class GameSessionManager extends GameModule {
     }
 
     final now = _clock.now();
-    final id = sessionId ?? _idGenerator.nextId('session');
+    final id = sessionId != null
+        ? Validators.requireSafeId(
+            sessionId,
+            'sessionId',
+            exceptionBuilder: (message) => SessionException(message),
+          )
+        : _idGenerator.nextId('session');
+    final validatedStats = <String, num>{};
+    for (final entry in statistics.entries) {
+      final statKey = Validators.requireSafeId(
+        entry.key,
+        'statistic key',
+        exceptionBuilder: (message) => SessionException(message),
+      );
+      if (!entry.value.isFinite) {
+        throw SessionException(
+          'Statistic "$statKey" value must be finite (got ${entry.value}).',
+        );
+      }
+      validatedStats[statKey] = entry.value;
+    }
     _activeSegmentStart = now;
     _current = SessionState(
       sessionId: id,
@@ -168,7 +192,7 @@ class GameSessionManager extends GameModule {
       startTime: now,
       duration: Duration.zero,
       sessionScore: 0,
-      statistics: statistics,
+      statistics: validatedStats,
     );
     _emitState();
     _emitEvent(SessionStartedEvent(session: _current, timestamp: now));
@@ -237,8 +261,24 @@ class GameSessionManager extends GameModule {
         'Cannot record statistics without an open session.',
       );
     }
+    final safeKey = Validators.requireSafeId(
+      key,
+      'statistic key',
+      exceptionBuilder: (message) => SessionException(message),
+    );
+    if (!delta.isFinite) {
+      throw SessionException(
+        'Statistic delta for "$safeKey" must be finite (got $delta).',
+      );
+    }
     final stats = Map<String, num>.of(_current.statistics);
-    stats[key] = (stats[key] ?? 0) + delta;
+    final nextValue = (stats[safeKey] ?? 0) + delta;
+    if (!nextValue.isFinite) {
+      throw SessionException(
+        'Statistic value for "$safeKey" overflowed finite bounds.',
+      );
+    }
+    stats[safeKey] = nextValue;
     _current = _current.copyWith(statistics: stats);
     _emitState();
   }
@@ -251,8 +291,18 @@ class GameSessionManager extends GameModule {
         'Cannot set statistics without an open session.',
       );
     }
+    final safeKey = Validators.requireSafeId(
+      key,
+      'statistic key',
+      exceptionBuilder: (message) => SessionException(message),
+    );
+    if (!value.isFinite) {
+      throw SessionException(
+        'Statistic value for "$safeKey" must be finite (got $value).',
+      );
+    }
     final stats = Map<String, num>.of(_current.statistics);
-    stats[key] = value;
+    stats[safeKey] = value;
     _current = _current.copyWith(statistics: stats);
     _emitState();
   }
@@ -282,6 +332,9 @@ class GameSessionManager extends GameModule {
       restored.add(
         SessionState.fromJson(GameSerialization.normalizeMap(entry)),
       );
+    }
+    if (restored.length > maxHistoryEntries) {
+      restored.removeRange(0, restored.length - maxHistoryEntries);
     }
     _history
       ..clear()
@@ -334,6 +387,13 @@ class GameSessionManager extends GameModule {
       }
       restoredHistory.add(
         SessionState.fromJson(GameSerialization.normalizeMap(entry)),
+      );
+    }
+
+    if (restoredHistory.length > maxHistoryEntries) {
+      restoredHistory.removeRange(
+        0,
+        restoredHistory.length - maxHistoryEntries,
       );
     }
 

@@ -1,4 +1,5 @@
 import '../core/game_exception.dart';
+import '../utils/validators.dart';
 import 'game_storage.dart';
 import 'serialization.dart';
 
@@ -11,11 +12,20 @@ class MemoryGameStorage implements GameStorage {
   /// Creates a [MemoryGameStorage], optionally seeded with [initialEntries].
   MemoryGameStorage({
     Map<String, Map<String, Object?>> initialEntries = const {},
+    this.maxNestingDepth = GameSerialization.defaultMaxNestingDepth,
   }) {
+    Validators.requirePositive(maxNestingDepth, 'maxNestingDepth');
     for (final entry in initialEntries.entries) {
-      _store[entry.key] = GameSerialization.normalizeMap(entry.value);
+      final safeKey = _validateKey(entry.key);
+      _store[safeKey] = GameSerialization.normalizeMap(
+        entry.value,
+        maxDepth: maxNestingDepth,
+      );
     }
   }
+
+  /// Maximum allowed container nesting depth for stored payloads.
+  final int maxNestingDepth;
 
   final Map<String, Map<String, Object?>> _store = {};
 
@@ -25,28 +35,37 @@ class MemoryGameStorage implements GameStorage {
   /// Returns `true` if [key] currently exists in memory.
   bool containsKey(String key) => _store.containsKey(key);
 
+  String _validateKey(String key) => Validators.requireSafeKey(
+    key,
+    'Storage key',
+    exceptionBuilder: (message) => PersistenceException(message),
+  );
+
   @override
   Future<void> save(String key, Map<String, Object?> data) async {
-    if (key.trim().isEmpty) {
-      throw const PersistenceException('Storage key cannot be empty.');
-    }
+    final safeKey = _validateKey(key);
     // Validate and copy completely before replacing the stored slot (atomic).
-    final copy = GameSerialization.normalizeMap(data);
-    _store[key] = copy;
+    final copy = GameSerialization.normalizeMap(
+      data,
+      maxDepth: maxNestingDepth,
+    );
+    _store[safeKey] = copy;
   }
 
   @override
   Future<Map<String, Object?>?> read(String key) async {
-    final existing = _store[key];
+    final safeKey = _validateKey(key);
+    final existing = _store[safeKey];
     if (existing == null) {
       return null;
     }
-    return GameSerialization.normalizeMap(existing);
+    return GameSerialization.normalizeMap(existing, maxDepth: maxNestingDepth);
   }
 
   @override
   Future<void> delete(String key) async {
-    _store.remove(key);
+    final safeKey = _validateKey(key);
+    _store.remove(safeKey);
   }
 
   @override

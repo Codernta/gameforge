@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import '../core/game_exception.dart';
+import '../utils/validators.dart';
 import 'audio_settings.dart';
 
 /// Engine-independent audio service interface for background music, sound
@@ -89,14 +90,23 @@ class NoopGameAudioService implements GameAudioService {
   Future<void> initialize() async {}
 
   @override
-  Future<void> preload(List<String> assetIds) async {}
+  Future<void> preload(List<String> assetIds) async {
+    for (final id in assetIds) {
+      Validators.requireSafeAssetId(id, 'assetId');
+    }
+  }
 
   @override
   Future<void> playMusic(
     String trackId, {
     bool loop = true,
     double? volume,
-  }) async {}
+  }) async {
+    Validators.requireSafeAssetId(trackId, 'trackId');
+    if (volume != null) {
+      _validateVolume(volume);
+    }
+  }
 
   @override
   Future<void> stopMusic() async {}
@@ -108,7 +118,12 @@ class NoopGameAudioService implements GameAudioService {
   Future<void> resumeMusic() async {}
 
   @override
-  Future<void> playSfx(String soundId, {double? volume}) async {}
+  Future<void> playSfx(String soundId, {double? volume}) async {
+    Validators.requireSafeAssetId(soundId, 'soundId');
+    if (volume != null) {
+      _validateVolume(volume);
+    }
+  }
 
   @override
   Future<void> setMasterVolume(double volume) =>
@@ -235,6 +250,9 @@ class RecordingGameAudioService extends NoopGameAudioService {
 
   @override
   Future<void> preload(List<String> assetIds) async {
+    for (final id in assetIds) {
+      Validators.requireSafeAssetId(id, 'assetId');
+    }
     _preloaded.addAll(assetIds);
     for (final id in assetIds) {
       _calls.add(RecordedAudioCall(action: 'preload', assetId: id));
@@ -247,6 +265,10 @@ class RecordingGameAudioService extends NoopGameAudioService {
     bool loop = true,
     double? volume,
   }) async {
+    Validators.requireSafeAssetId(trackId, 'trackId');
+    if (volume != null) {
+      NoopGameAudioService._validateVolume(volume);
+    }
     _currentMusicTrack = trackId;
     _isMusicPlaying = true;
     _isMusicPaused = false;
@@ -286,6 +308,10 @@ class RecordingGameAudioService extends NoopGameAudioService {
 
   @override
   Future<void> playSfx(String soundId, {double? volume}) async {
+    Validators.requireSafeAssetId(soundId, 'soundId');
+    if (volume != null) {
+      NoopGameAudioService._validateVolume(volume);
+    }
     _calls.add(
       RecordedAudioCall(
         action: 'playSfx',

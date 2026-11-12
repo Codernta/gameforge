@@ -7,6 +7,8 @@ import '../core/game_exception.dart';
 import '../core/game_module.dart';
 import '../persistence/serialization.dart';
 import '../utils/game_clock.dart';
+import '../utils/security.dart';
+import '../utils/validators.dart';
 import 'score_event.dart';
 import 'score_state.dart';
 
@@ -104,9 +106,37 @@ class ScoreManager extends GameModule {
       );
     }
 
-    final rawDelta = applyMultiplier
-        ? (points * _state.effectiveMultiplier).round()
-        : points;
+    final maxScore = _rules.effectiveMaxScore;
+    final int rawDelta;
+    if (applyMultiplier) {
+      final eff = _state.effectiveMultiplier;
+      if (!eff.isFinite || eff < 0) {
+        throw ScoreValidationException(
+          'Effective score multiplier must be finite and non-negative '
+          '(got $eff).',
+        );
+      }
+      final product = points * eff;
+      if (!product.isFinite) {
+        throw const ScoreValidationException(
+          'Score calculation overflowed finite bounds.',
+        );
+      }
+      if (product > GameSecurity.maxSafeInteger) {
+        if (_rules.clampOnOverflow) {
+          rawDelta = maxScore - _state.currentScore;
+        } else {
+          throw const ScoreValidationException(
+            'Multiplied score delta overflows maxSafeScore '
+            '(${GameSecurity.maxSafeInteger}).',
+          );
+        }
+      } else {
+        rawDelta = product.round();
+      }
+    } else {
+      rawDelta = points;
+    }
 
     final nextScore = _checkedAdd(_state.currentScore, rawDelta);
     _updateScore(nextScore);
@@ -245,7 +275,15 @@ class ScoreManager extends GameModule {
         'Combo increment must be greater than zero (got $by).',
       );
     }
-    setCombo(_state.comboCount + by);
+    final nextCombo = Validators.safeAddInt(
+      _state.comboCount,
+      by,
+      'Combo count',
+      min: 0,
+      max: GameSecurity.maxSafeInteger,
+      exceptionBuilder: (message) => ScoreValidationException(message),
+    );
+    setCombo(nextCombo);
   }
 
   /// Sets the active combo count to [count] and updates [comboMultiplier].
@@ -260,6 +298,11 @@ class ScoreManager extends GameModule {
     var nextMultiplier = 1.0 + count * _rules.comboMultiplierStep;
     if (_rules.maxComboMultiplier != null) {
       nextMultiplier = math.min(nextMultiplier, _rules.maxComboMultiplier!);
+    }
+    if (!nextMultiplier.isFinite) {
+      throw const ScoreValidationException(
+        'Calculated comboMultiplier must remain finite.',
+      );
     }
     if (previous == count && _state.comboMultiplier == nextMultiplier) {
       return;
@@ -374,7 +417,8 @@ class ScoreManager extends GameModule {
 
   int _checkedAdd(int base, int delta) {
     final maxScore = _rules.effectiveMaxScore;
-    if (delta > maxScore - base) {
+    final bigNext = BigInt.from(base) + BigInt.from(delta);
+    if (bigNext > BigInt.from(maxScore)) {
       if (_rules.clampOnOverflow) {
         return maxScore;
       }
@@ -382,7 +426,7 @@ class ScoreManager extends GameModule {
         'Adding $delta to $base exceeds maxScore ($maxScore).',
       );
     }
-    return base + delta;
+    return bigNext.toInt();
   }
 
   void _updateScore(int nextScore) {

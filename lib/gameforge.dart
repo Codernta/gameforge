@@ -73,4 +73,5 @@ export 'src/timer/timer_state.dart';
 // Utilities
 export 'src/utils/game_clock.dart';
 export 'src/utils/id_generator.dart';
+export 'src/utils/security.dart';
 export 'src/utils/validators.dart';

@@ -10,6 +10,8 @@ import '../persistence/serialization.dart';
 import '../score/score_manager.dart';
 import '../utils/game_clock.dart';
 import '../utils/id_generator.dart';
+import '../utils/security.dart';
+import '../utils/validators.dart';
 import 'reward.dart';
 import 'reward_event.dart';
 
@@ -209,11 +211,32 @@ class RewardManager extends GameModule {
 
       switch (current.type) {
         case GameRewardType.coins:
-          coinDelta += current.amount;
+          coinDelta = Validators.safeAddInt(
+            coinDelta,
+            current.amount,
+            'Reward coins',
+            min: 0,
+            max: GameSecurity.maxSafeInteger,
+            exceptionBuilder: (message) => RewardException(message),
+          );
         case GameRewardType.experience:
-          xpDelta += current.amount;
+          xpDelta = Validators.safeAddInt(
+            xpDelta,
+            current.amount,
+            'Reward experience',
+            min: 0,
+            max: GameSecurity.maxSafeInteger,
+            exceptionBuilder: (message) => RewardException(message),
+          );
         case GameRewardType.points:
-          pointsDelta += current.amount;
+          pointsDelta = Validators.safeAddInt(
+            pointsDelta,
+            current.amount,
+            'Reward points',
+            min: 0,
+            max: GameSecurity.maxSafeInteger,
+            exceptionBuilder: (message) => RewardException(message),
+          );
         case GameRewardType.item:
           if (current.item != null) {
             itemsToAdd.add(current.item!);
@@ -228,6 +251,31 @@ class RewardManager extends GameModule {
     }
 
     collect(reward);
+
+    final nextCoinBalance = Validators.safeAddInt(
+      _state.coinBalance,
+      coinDelta,
+      'Coin balance',
+      min: 0,
+      max: GameSecurity.maxSafeInteger,
+      exceptionBuilder: (message) => RewardException(message),
+    );
+    final nextTotalCoinsEarned = Validators.safeAddInt(
+      _state.totalCoinsEarned,
+      coinDelta,
+      'Total coins earned',
+      min: 0,
+      max: GameSecurity.maxSafeInteger,
+      exceptionBuilder: (message) => RewardException(message),
+    );
+    final nextTotalExperience = Validators.safeAddInt(
+      _state.totalExperience,
+      xpDelta,
+      'Total experience',
+      min: 0,
+      max: GameSecurity.maxSafeInteger,
+      exceptionBuilder: (message) => RewardException(message),
+    );
 
     // Apply external side effects before committing reward balances so failures
     // (such as full inventory or score overflow) roll back cleanly.
@@ -249,9 +297,9 @@ class RewardManager extends GameModule {
       ..addAll(claimedIdsToAdd);
 
     _state = RewardState(
-      coinBalance: _state.coinBalance + coinDelta,
-      totalCoinsEarned: _state.totalCoinsEarned + coinDelta,
-      totalExperience: _state.totalExperience + xpDelta,
+      coinBalance: nextCoinBalance,
+      totalCoinsEarned: nextTotalCoinsEarned,
+      totalExperience: nextTotalExperience,
       claimedRewardIds: updatedClaimed,
       pendingRewards: _state.pendingRewards,
     );
@@ -330,6 +378,18 @@ class RewardManager extends GameModule {
     if (coinBalance < 0 || totalCoinsEarned < 0 || totalExperience < 0) {
       throw const SaveValidationException(
         'Saved reward balances cannot be negative.',
+      );
+    }
+    if (coinBalance > GameSecurity.maxSafeInteger ||
+        totalCoinsEarned > GameSecurity.maxSafeInteger ||
+        totalExperience > GameSecurity.maxSafeInteger) {
+      throw const SaveValidationException(
+        'Saved reward balances exceed safe integer bounds.',
+      );
+    }
+    if (coinBalance > totalCoinsEarned) {
+      throw const SaveValidationException(
+        'Saved coinBalance cannot exceed totalCoinsEarned.',
       );
     }
 

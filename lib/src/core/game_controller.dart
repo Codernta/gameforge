@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import '../achievements/achievement.dart';
 import '../achievements/achievement_manager.dart';
@@ -12,6 +13,7 @@ import '../levels/level_manager.dart';
 import '../persistence/game_save_data.dart';
 import '../persistence/game_storage.dart';
 import '../persistence/memory_game_storage.dart';
+import '../persistence/serialization.dart';
 import '../rewards/reward.dart';
 import '../rewards/reward_manager.dart';
 import '../score/score_manager.dart';
@@ -21,6 +23,8 @@ import '../timer/game_timer.dart';
 import '../timer/timer_state.dart';
 import '../utils/game_clock.dart';
 import '../utils/id_generator.dart';
+import '../utils/security.dart';
+import '../utils/validators.dart';
 import 'game_config.dart';
 import 'game_event.dart';
 import 'game_event_bus.dart';
@@ -49,6 +53,7 @@ class GameForge {
     List<GameReward> initialPendingRewards = const [],
     List<GameModule> modules = const [],
     List<SaveMigration> saveMigrations = const [],
+    List<int>? saveSigningKey,
     bool disposeEventBusOnDispose = true,
   }) : _clock = clock,
        _ticker = ticker,
@@ -57,6 +62,7 @@ class GameForge {
        _audio = audio ?? NoopGameAudioService(),
        _events = eventBus ?? GameEventBus(),
        _migrationRunner = SaveMigrationRunner(saveMigrations),
+       _saveSigningKey = _copySigningKey(saveSigningKey),
        _disposeEventBusOnDispose = disposeEventBusOnDispose {
     config.validate();
 
@@ -143,7 +149,31 @@ class GameForge {
   final GameAudioService _audio;
   final GameEventBus _events;
   final SaveMigrationRunner _migrationRunner;
+  final Uint8List? _saveSigningKey;
   final bool _disposeEventBusOnDispose;
+
+  static Uint8List? _copySigningKey(List<int>? rawKey) {
+    if (rawKey == null) {
+      return null;
+    }
+    if (rawKey.isEmpty) {
+      throw const GameConfigurationException(
+        'saveSigningKey must not be empty when provided.',
+      );
+    }
+    final copy = Uint8List(rawKey.length);
+    for (var i = 0; i < rawKey.length; i++) {
+      final byte = rawKey[i];
+      if (byte < 0 || byte > 0xFF) {
+        GameSecurity.zeroBytes(copy);
+        throw GameConfigurationException(
+          'saveSigningKey[$i] must be a byte value in 0..255 (got $byte).',
+        );
+      }
+      copy[i] = byte;
+    }
+    return copy;
+  }
 
   late final ScoreManager _score;
   late final HealthManager _health;
@@ -445,9 +475,22 @@ class GameForge {
     Map<String, Object?> metadata = const {},
   }) async {
     _ensureInitialized('save');
-    final targetKey = key ?? config.saveKey;
+    final targetKey = Validators.requireSafeKey(
+      key ?? config.saveKey,
+      'Save key',
+      exceptionBuilder: (message) => PersistenceException(message),
+    );
     final saveData = createSaveData(metadata: metadata);
-    await _storage.save(targetKey, saveData.toJson());
+    final payload = saveData.toJson(
+      secretKey: _saveSigningKey,
+      maxDepth: config.maxSaveNestingDepth,
+    );
+    GameSerialization.encodeJson(
+      payload,
+      maxBytes: config.maxSaveBytes,
+      maxDepth: config.maxSaveNestingDepth,
+    );
+    await _storage.save(targetKey, payload);
     _emitEvent(
       GameSavedEvent(
         key: targetKey,
@@ -490,17 +533,55 @@ class GameForge {
   /// their pre-load snapshots.
   Future<bool> load({String? key}) async {
     _ensureInitialized('load');
-    final targetKey = key ?? config.saveKey;
+    final targetKey = Validators.requireSafeKey(
+      key ?? config.saveKey,
+      'Save key',
+      exceptionBuilder: (message) => PersistenceException(message),
+    );
     final raw = await _storage.read(targetKey);
     if (raw == null) {
       return false;
     }
 
+    // Enforce configured byte/depth bounds even on custom GameStorage backends.
+    try {
+      GameSerialization.encodeJson(
+        raw,
+        maxBytes: config.maxSaveBytes,
+        maxDepth: config.maxSaveNestingDepth,
+      );
+    } on PersistenceException catch (error, stackTrace) {
+      if (error is CorruptSaveDataException) {
+        rethrow;
+      }
+      throw CorruptSaveDataException(
+        'Save payload exceeds security limits.',
+        cause: error,
+        stackTrace: stackTrace,
+      );
+    }
+
     final migrated = _migrationRunner.migrateTo(
       rawData: raw,
       targetVersion: config.saveVersion,
+      verifyChecksum: true,
+      requireChecksum: config.requireSaveIntegrity,
+      secretKey: _saveSigningKey,
+      maxDepth: config.maxSaveNestingDepth,
     );
-    final saveData = GameSaveData.fromJson(migrated);
+    final saveData = GameSaveData.fromJson(
+      migrated,
+      verifyChecksum: true,
+      requireChecksum: config.requireSaveIntegrity,
+      secretKey: _saveSigningKey,
+      maxDepth: config.maxSaveNestingDepth,
+    );
+    if (saveData.version != config.saveVersion) {
+      throw SaveMigrationException(
+        'Loaded save version ${saveData.version} does not match configured '
+        'version ${config.saveVersion}.',
+      );
+    }
 
     // Capture rollback snapshots prior to mutating any module.
     final rollback = createSaveData();
@@ -528,7 +609,12 @@ class GameForge {
   /// Deletes the save snapshot stored under [key] (or [GameConfig.saveKey]).
   Future<void> deleteSave({String? key}) {
     _ensureNotDisposed('deleteSave');
-    return _storage.delete(key ?? config.saveKey);
+    final targetKey = Validators.requireSafeKey(
+      key ?? config.saveKey,
+      'Save key',
+      exceptionBuilder: (message) => PersistenceException(message),
+    );
+    return _storage.delete(targetKey);
   }
 
   /// Permanently disposes this [GameForge] instance, releasing all module
@@ -536,6 +622,9 @@ class GameForge {
   Future<void> dispose() async {
     if (_status == GameStatus.disposed) {
       return;
+    }
+    if (_saveSigningKey != null) {
+      GameSecurity.zeroBytes(_saveSigningKey);
     }
     if (!_events.isDisposed) {
       _events.tryEmit(GameDisposedEvent(timestamp: _clock.now()));
