@@ -1,0 +1,134 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  format_and_guards:
+    name: Format, Isolation & Package Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install root dependencies
+        run: flutter pub get
+
+      - name: Verify Dart formatting
+        run: dart format --output=none --set-exit-if-changed lib test example packages
+
+      - name: Verify pure Dart core isolation
+        run: |
+          if grep -rnE "^\s*import\s+['\"](package:flutter/|dart:ui|dart:io|dart:html|dart:js|package:web/)" lib/gameforge.dart lib/src/ --exclude-dir=adapters; then
+            echo "::error::Core pure Dart files must not import Flutter UI, dart:io, or browser/JS libraries."
+            exit 1
+          fi
+
+      - name: Validate pub.dev package archive
+        run: dart pub publish --dry-run
+
+  test_matrix:
+    name: Analyze & Test (${{ matrix.package.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - name: gameforge
+            path: .
+            coverage: true
+          - name: example
+            path: example
+            coverage: false
+          - name: gameforge_shared_preferences
+            path: packages/gameforge_shared_preferences
+            coverage: false
+          - name: gameforge_flame
+            path: packages/gameforge_flame
+            coverage: false
+          - name: gameforge_audioplayers
+            path: packages/gameforge_audioplayers
+            coverage: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        working-directory: ${{ matrix.package.path }}
+        run: flutter pub get
+
+      - name: Analyze package
+        working-directory: ${{ matrix.package.path }}
+        run: flutter analyze --fatal-infos
+
+      - name: Run tests
+        if: ${{ !matrix.package.coverage }}
+        working-directory: ${{ matrix.package.path }}
+        run: flutter test
+
+      - name: Run tests with coverage
+        if: ${{ matrix.package.coverage }}
+        working-directory: ${{ matrix.package.path }}
+        run: flutter test --coverage
+
+      - name: Upload coverage artifact
+        if: matrix.package.coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcov-coverage
+          path: coverage/lcov.info
+          if-no-files-found: error
+          retention-days: 14
+
+  dependency_check:
+    name: Outdated Dependency Report
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Check dependencies across workspace
+        run: |
+          for dir in . example packages/gameforge_shared_preferences packages/gameforge_flame packages/gameforge_audioplayers; do
+            echo "=== $dir ==="
+            (cd "$dir" && flutter pub get && flutter pub outdated)
+          done

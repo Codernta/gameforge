@@ -1,5 +1,6 @@
-# Exclude companion packages, documentation media, and generated build/tool
-# directories from the core gameforge pub.dev archive.
+# Exclude companion packages, CI configuration, documentation media, and
+# generated build/tool directories from the core gameforge pub.dev archive.
+.github/
 packages/
 doc/assets/
 .idea/

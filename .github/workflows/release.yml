@@ -1,0 +1,119 @@
+name: Release to pub.dev
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Run validation only without publishing to pub.dev
+        required: false
+        type: boolean
+        default: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  verify:
+    name: Verify Release Readiness
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Validate tag matches pubspec.yaml and CHANGELOG.md
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          TAG_VERSION="${TAG_NAME#v}"
+          PUBSPEC_VERSION="$(sed -nE 's/^version:[[:space:]]*([^[:space:]]+)[[:space:]]*$/\1/p' pubspec.yaml | head -n1)"
+          if [ "$TAG_VERSION" != "$PUBSPEC_VERSION" ]; then
+            echo "::error::Tag version ($TAG_VERSION) does not match pubspec.yaml version ($PUBSPEC_VERSION)."
+            exit 1
+          fi
+          if ! grep -qE "^##[[:space:]]+${PUBSPEC_VERSION}([[:space:]]|$)" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md does not contain a '## $PUBSPEC_VERSION' heading."
+            exit 1
+          fi
+
+      - name: Verify formatting across workspace
+        run: dart format --output=none --set-exit-if-changed lib test example packages
+
+      - name: Verify pure Dart core isolation
+        run: |
+          if grep -rnE "^\s*import\s+['\"](package:flutter/|dart:ui|dart:io|dart:html|dart:js|package:web/)" lib/gameforge.dart lib/src/ --exclude-dir=adapters; then
+            echo "::error::Core pure Dart files must not import Flutter UI, dart:io, or browser/JS libraries."
+            exit 1
+          fi
+
+      - name: Analyze & test all workspace packages
+        run: |
+          for dir in . example packages/gameforge_shared_preferences packages/gameforge_flame packages/gameforge_audioplayers; do
+            echo "=== Testing $dir ==="
+            (cd "$dir" && flutter pub get && flutter analyze --fatal-infos && flutter test)
+          done
+
+  publish_pubdev:
+    name: Publish Package to pub.dev
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: pub.dev
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Run pub publish dry-run
+        run: dart pub publish --dry-run
+
+      - name: Publish to pub.dev using OIDC
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
+        run: dart pub publish --force
+
+  github_release:
+    name: Create GitHub Release
+    needs: publish_pubdev
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG_NAME" \
+            --title "GameForge $TAG_NAME" \
+            --generate-notes
