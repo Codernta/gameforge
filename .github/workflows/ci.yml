@@ -103,7 +103,7 @@ jobs:
 
       - name: Upload coverage artifact
         if: matrix.package.coverage
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lcov-coverage
           path: coverage/lcov.info
